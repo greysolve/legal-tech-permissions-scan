@@ -1,0 +1,59 @@
+{
+  "Clio": {
+    "BaseURL": "https://app.clio.com/api/v4",
+    "AccessToken": "YOUR_CLIO_ACCESS_TOKEN_HERE",
+    "Note": "Get access token from Clio OAuth 2.0 flow at https://app.clio.com/oauth/authorize",
+    "Instructions": [
+      "1. Create a developer account at https://www.clio.com/partnerships/developers/",
+      "2. Create a new application in your developer portal",
+      "3. Get OAuth 2.0 access token through authorization flow",
+      "4. Required scopes: users, contacts, matters, billing (adjust per needs)"
+    ]
+  },
+  "NetSuite": {
+    "AccountId": "YOUR_NETSUITE_ACCOUNT_ID",
+    "ConsumerKey": "YOUR_CONSUMER_KEY", 
+    "ConsumerSecret": "YOUR_CONSUMER_SECRET",
+    "TokenId": "YOUR_TOKEN_ID",
+    "TokenSecret": "YOUR_TOKEN_SECRET",
+    "Note": "Use Token-Based Authentication (TBA) credentials from NetSuite",
+    "Instructions": [
+      "1. Go to Setup > Integration > Manage Integrations > New",
+      "2. Create integration record with Token-Based Authentication",
+      "3. Create role with Web Services permissions (Full level required)",
+      "4. Go to Setup > Users/Roles > Access Tokens > New",
+      "5. Select your integration and user/role, generate tokens"
+    ]
+  },
+  "QuickBooks": {
+    "BaseURL": "https://sandbox-quickbooks.api.intuit.com",
+    "AccessToken": "YOUR_QB_ACCESS_TOKEN",
+    "CompanyId": "YOUR_COMPANY_ID", 
+    "RefreshToken": "YOUR_REFRESH_TOKEN",
+    "Note": "Use OAuth 2.0 credentials from QuickBooks developer portal",
+    "Instructions": [
+      "1. Create developer account at https://developer.intuit.com/",
+      "2. Create new app with QuickBooks Online Accounting scope",
+      "3. Use OAuth 2.0 flow to get access token and company ID",
+      "4. For production, change BaseURL to https://quickbooks.api.intuit.com",
+      "5. Company ID found in QB URL or via CTRL+ALT+? in QuickBooks"
+    ]
+  },
+  "Regional": {
+    "ClioEurope": {
+      "BaseURL": "https://eu.app.clio.com/api/v4",
+      "Note": "Use this URL for European Clio accounts"
+    },
+    "NetSuiteProduction": {
+      "BaseURL": "https://{ACCOUNT_ID}.suitetalk.api.netsuite.com/services/rest",
+      "Note": "Replace {ACCOUNT_ID} with your NetSuite account ID"
+    }
+  },
+  "OutputSettings": {
+    "IncludePII": false,
+    "MaskEmails": true,
+    "SeparateByPlatform": true,
+    "GenerateRiskReport": true,
+    "Note": "Privacy and output formatting options"
+  }
+}

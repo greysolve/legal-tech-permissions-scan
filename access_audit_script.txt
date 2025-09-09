@@ -1,0 +1,722 @@
+#!/usr/bin/env pwsh
+<#
+.SYNOPSIS
+    Professional Services Access Audit Script - Clio, NetSuite & QuickBooks
+    
+.DESCRIPTION
+    This script audits user access and permissions across Clio, NetSuite, and QuickBooks
+    platforms. It generates normalized CSV reports for compliance and segregation of 
+    duties analysis.
+    
+.PARAMETER ConfigFile
+    Path to JSON configuration file containing API credentials
+    
+.PARAMETER OutputPath
+    Directory path for output CSV files (default: ./audit_reports)
+    
+.PARAMETER Platforms
+    Comma-separated list of platforms to audit: Clio,NetSuite,QuickBooks (default: all)
+    
+.EXAMPLE
+    .\AccessAudit.ps1 -ConfigFile ".\config.json" -OutputPath ".\reports"
+    
+.NOTES
+    Author: Professional Services IT Auditor
+    Version: 1.0
+    Requires: PowerShell 7+, REST API access to target platforms
+#>
+
+param(
+    [Parameter(Mandatory = $false)]
+    [string]$ConfigFile = ".\audit_config.json",
+    
+    [Parameter(Mandatory = $false)]
+    [string]$OutputPath = ".\audit_reports",
+    
+    [Parameter(Mandatory = $false)]
+    [string[]]$Platforms = @("Clio", "NetSuite", "QuickBooks")
+)
+
+# Import required modules
+try {
+    Import-Module Microsoft.PowerShell.Utility -Force
+    Import-Module Microsoft.PowerShell.Security -Force
+} catch {
+    Write-Error "Required PowerShell modules not available. Ensure PowerShell 7+ is installed."
+    exit 1
+}
+
+# Configuration and credential management
+class AuditConfig {
+    [hashtable]$Clio
+    [hashtable]$NetSuite  
+    [hashtable]$QuickBooks
+    [string]$OutputPath
+    [string]$ReportDate
+    
+    AuditConfig() {
+        $this.ReportDate = Get-Date -Format "yyyy-MM-dd_HHmm"
+    }
+}
+
+# Normalized user access record
+class AccessRecord {
+    [string]$Platform
+    [string]$UserId
+    [string]$UserName
+    [string]$Email
+    [string]$Role
+    [string]$Department
+    [string]$Status
+    [string]$LastLogin
+    [string]$Permissions
+    [string]$SystemAccess
+    [string]$AdminRights
+    [string]$FinancialAccess
+    [string]$ClientDataAccess
+    [string]$EmployeeStatus
+    [datetime]$AuditDate
+    [string]$Notes
+}
+
+# Platform-specific API clients
+class ClioAPIClient {
+    [string]$BaseURL
+    [string]$AccessToken
+    [hashtable]$Headers
+    
+    ClioAPIClient([hashtable]$config) {
+        $this.BaseURL = $config.BaseURL
+        $this.AccessToken = $config.AccessToken
+        $this.Headers = @{
+            "Authorization" = "Bearer $($this.AccessToken)"
+            "Content-Type" = "application/json"
+            "Accept" = "application/json"
+        }
+    }
+    
+    [PSObject] GetUsers() {
+        try {
+            $uri = "$($this.BaseURL)/users"
+            Write-Host "🔍 Fetching Clio users from: $uri" -ForegroundColor Cyan
+            
+            $response = Invoke-RestMethod -Uri $uri -Headers $this.Headers -Method Get
+            Write-Host "✅ Retrieved $($response.data.Count) Clio users" -ForegroundColor Green
+            return $response.data
+        }
+        catch {
+            Write-Error "❌ Clio API Error: $($_.Exception.Message)"
+            return @()
+        }
+    }
+    
+    [PSObject] GetUserPermissions([string]$userId) {
+        try {
+            $uri = "$($this.BaseURL)/users/$userId"
+            $response = Invoke-RestMethod -Uri $uri -Headers $this.Headers -Method Get
+            return $response.data
+        }
+        catch {
+            Write-Warning "⚠️ Could not fetch permissions for Clio user $userId"
+            return $null
+        }
+    }
+    
+    [PSObject] GetCurrentUser() {
+        try {
+            $uri = "$($this.BaseURL)/users/who_am_i"
+            $response = Invoke-RestMethod -Uri $uri -Headers $this.Headers -Method Get
+            return $response.data
+        }
+        catch {
+            Write-Error "❌ Clio authentication failed: $($_.Exception.Message)"
+            return $null
+        }
+    }
+}
+
+class NetSuiteAPIClient {
+    [string]$BaseURL
+    [string]$AccountId
+    [hashtable]$OAuthParams
+    [hashtable]$Headers
+    
+    NetSuiteAPIClient([hashtable]$config) {
+        $this.BaseURL = "https://$($config.AccountId).suitetalk.api.netsuite.com/services/rest"
+        $this.AccountId = $config.AccountId
+        $this.OAuthParams = @{
+            ConsumerKey = $config.ConsumerKey
+            ConsumerSecret = $config.ConsumerSecret
+            TokenId = $config.TokenId
+            TokenSecret = $config.TokenSecret
+        }
+        $this.Headers = @{
+            "Content-Type" = "application/json"
+            "Accept" = "application/json"
+        }
+    }
+    
+    [string] GenerateOAuthSignature([string]$method, [string]$url) {
+        # Simplified OAuth 1.0a signature generation for NetSuite
+        $timestamp = [Math]::Floor([decimal](Get-Date(Get-Date).ToUniversalTime()-uformat "%s"))
+        $nonce = [System.Guid]::NewGuid().ToString("N")
+        
+        $oauth_params = @{
+            "oauth_consumer_key" = $this.OAuthParams.ConsumerKey
+            "oauth_token" = $this.OAuthParams.TokenId
+            "oauth_signature_method" = "HMAC-SHA256"
+            "oauth_timestamp" = $timestamp
+            "oauth_nonce" = $nonce
+            "oauth_version" = "1.0"
+        }
+        
+        # Create signature base string
+        $params_string = ($oauth_params.GetEnumerator() | Sort-Object Name | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join "&"
+        $base_string = "$method&" + [System.Web.HttpUtility]::UrlEncode($url) + "&" + [System.Web.HttpUtility]::UrlEncode($params_string)
+        
+        # Create signing key
+        $signing_key = [System.Web.HttpUtility]::UrlEncode($this.OAuthParams.ConsumerSecret) + "&" + [System.Web.HttpUtility]::UrlEncode($this.OAuthParams.TokenSecret)
+        
+        # Generate signature
+        $hmac = New-Object System.Security.Cryptography.HMACSHA256
+        $hmac.Key = [System.Text.Encoding]::UTF8.GetBytes($signing_key)
+        $signature = [Convert]::ToBase64String($hmac.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($base_string)))
+        
+        $oauth_params["oauth_signature"] = $signature
+        
+        # Build authorization header
+        $auth_header = "OAuth " + (($oauth_params.GetEnumerator() | ForEach-Object { "$($_.Key)=`"$([System.Web.HttpUtility]::UrlEncode($_.Value))`"" }) -join ", ")
+        
+        return $auth_header
+    }
+    
+    [PSObject] GetEmployees() {
+        try {
+            $uri = "$($this.BaseURL)/record/v1/employee"
+            $auth_header = $this.GenerateOAuthSignature("GET", $uri)
+            
+            $headers = $this.Headers.Clone()
+            $headers["Authorization"] = $auth_header
+            
+            Write-Host "🔍 Fetching NetSuite employees from: $uri" -ForegroundColor Cyan
+            
+            $response = Invoke-RestMethod -Uri $uri -Headers $headers -Method Get
+            Write-Host "✅ Retrieved $($response.items.Count) NetSuite employees" -ForegroundColor Green
+            return $response.items
+        }
+        catch {
+            Write-Error "❌ NetSuite API Error: $($_.Exception.Message)"
+            return @()
+        }
+    }
+    
+    [PSObject] GetRoles() {
+        try {
+            $uri = "$($this.BaseURL)/record/v1/role"
+            $auth_header = $this.GenerateOAuthSignature("GET", $uri)
+            
+            $headers = $this.Headers.Clone()
+            $headers["Authorization"] = $auth_header
+            
+            Write-Host "🔍 Fetching NetSuite roles from: $uri" -ForegroundColor Cyan
+            
+            $response = Invoke-RestMethod -Uri $uri -Headers $headers -Method Get
+            return $response.items
+        }
+        catch {
+            Write-Error "❌ NetSuite Roles API Error: $($_.Exception.Message)"
+            return @()
+        }
+    }
+    
+    [PSObject] TestConnection() {
+        try {
+            # Test with a simple record query
+            $uri = "$($this.BaseURL)/record/v1/subsidiary"
+            $auth_header = $this.GenerateOAuthSignature("GET", $uri)
+            
+            $headers = $this.Headers.Clone()
+            $headers["Authorization"] = $auth_header
+            
+            $response = Invoke-RestMethod -Uri $uri -Headers $headers -Method Get
+            return $response
+        }
+        catch {
+            Write-Error "❌ NetSuite connection test failed: $($_.Exception.Message)"
+            return $null
+        }
+    }
+}
+
+class QuickBooksAPIClient {
+    [string]$BaseURL
+    [string]$AccessToken
+    [string]$CompanyId
+    [hashtable]$Headers
+    
+    QuickBooksAPIClient([hashtable]$config) {
+        $this.BaseURL = $config.BaseURL
+        $this.AccessToken = $config.AccessToken
+        $this.CompanyId = $config.CompanyId
+        $this.Headers = @{
+            "Authorization" = "Bearer $($this.AccessToken)"
+            "Content-Type" = "application/json"
+            "Accept" = "application/json"
+        }
+    }
+    
+    [PSObject] GetEmployees() {
+        try {
+            $uri = "$($this.BaseURL)/v3/company/$($this.CompanyId)/employee"
+            Write-Host "🔍 Fetching QuickBooks employees from: $uri" -ForegroundColor Cyan
+            
+            $response = Invoke-RestMethod -Uri $uri -Headers $this.Headers -Method Get
+            Write-Host "✅ Retrieved $($response.QueryResponse.Employee.Count) QuickBooks employees" -ForegroundColor Green
+            return $response.QueryResponse.Employee
+        }
+        catch {
+            Write-Error "❌ QuickBooks API Error: $($_.Exception.Message)"
+            return @()
+        }
+    }
+    
+    [PSObject] GetCompanyInfo() {
+        try {
+            $uri = "$($this.BaseURL)/v3/company/$($this.CompanyId)/companyinfo/1"
+            $response = Invoke-RestMethod -Uri $uri -Headers $this.Headers -Method Get
+            return $response.QueryResponse.CompanyInfo[0]
+        }
+        catch {
+            Write-Error "❌ QuickBooks Company Info Error: $($_.Exception.Message)"
+            return $null
+        }
+    }
+    
+    [PSObject] TestConnection() {
+        try {
+            return $this.GetCompanyInfo()
+        }
+        catch {
+            Write-Error "❌ QuickBooks connection test failed: $($_.Exception.Message)"
+            return $null
+        }
+    }
+}
+
+# Main audit engine
+class AccessAuditor {
+    [AuditConfig]$Config
+    [string]$OutputPath
+    [System.Collections.Generic.List[AccessRecord]]$AllRecords
+    
+    AccessAuditor([AuditConfig]$config, [string]$outputPath) {
+        $this.Config = $config
+        $this.OutputPath = $outputPath
+        $this.AllRecords = [System.Collections.Generic.List[AccessRecord]]::new()
+        
+        # Ensure output directory exists
+        if (-not (Test-Path $this.OutputPath)) {
+            New-Item -ItemType Directory -Path $this.OutputPath -Force | Out-Null
+        }
+    }
+    
+    [void] AuditClio() {
+        Write-Host "`n🔧 Starting Clio Access Audit..." -ForegroundColor Yellow
+        
+        try {
+            $client = [ClioAPIClient]::new($this.Config.Clio)
+            
+            # Test connection
+            $currentUser = $client.GetCurrentUser()
+            if (-not $currentUser) {
+                Write-Error "❌ Clio authentication failed. Check your access token."
+                return
+            }
+            
+            Write-Host "✅ Connected to Clio as: $($currentUser.name)" -ForegroundColor Green
+            
+            $users = $client.GetUsers()
+            
+            foreach ($user in $users) {
+                $userDetails = $client.GetUserPermissions($user.id)
+                
+                $record = [AccessRecord]::new()
+                $record.Platform = "Clio"
+                $record.UserId = $user.id
+                $record.UserName = $user.name
+                $record.Email = $user.email
+                $record.Status = if ($user.enabled) { "Active" } else { "Inactive" }
+                $record.LastLogin = $user.last_login_at
+                $record.AuditDate = Get-Date
+                
+                # Extract role and permissions
+                if ($userDetails) {
+                    $record.Role = $userDetails.role_name
+                    $record.AdminRights = if ($userDetails.role_name -like "*Admin*") { "Yes" } else { "No" }
+                    $record.FinancialAccess = if ($userDetails.permissions -like "*trust*" -or $userDetails.permissions -like "*billing*") { "Yes" } else { "No" }
+                    $record.ClientDataAccess = if ($userDetails.permissions -like "*matter*" -or $userDetails.permissions -like "*contact*") { "Yes" } else { "No" }
+                    $record.Permissions = ($userDetails.permissions -join "; ")
+                }
+                
+                $record.SystemAccess = "Clio Legal Practice Management"
+                $record.EmployeeStatus = "Active" # Clio doesn't track employment status directly
+                
+                $this.AllRecords.Add($record)
+            }
+            
+            Write-Host "✅ Clio audit completed. Processed $($users.Count) users." -ForegroundColor Green
+            
+        }
+        catch {
+            Write-Error "❌ Clio audit failed: $($_.Exception.Message)"
+        }
+    }
+    
+    [void] AuditNetSuite() {
+        Write-Host "`n🔧 Starting NetSuite Access Audit..." -ForegroundColor Yellow
+        
+        try {
+            $client = [NetSuiteAPIClient]::new($this.Config.NetSuite)
+            
+            # Test connection
+            $testResult = $client.TestConnection()
+            if (-not $testResult) {
+                Write-Error "❌ NetSuite authentication failed. Check your OAuth credentials."
+                return
+            }
+            
+            Write-Host "✅ Connected to NetSuite successfully" -ForegroundColor Green
+            
+            $employees = $client.GetEmployees()
+            $roles = $client.GetRoles()
+            
+            # Create role lookup
+            $roleLookup = @{}
+            foreach ($role in $roles) {
+                $roleLookup[$role.id] = $role
+            }
+            
+            foreach ($employee in $employees) {
+                $record = [AccessRecord]::new()
+                $record.Platform = "NetSuite"
+                $record.UserId = $employee.id
+                $record.UserName = $employee.entityid
+                $record.Email = $employee.email
+                $record.Status = if ($employee.isinactive) { "Inactive" } else { "Active" }
+                $record.Department = $employee.department
+                $record.EmployeeStatus = if ($employee.isInactive) { "Terminated" } else { "Active" }
+                $record.LastLogin = $employee.lastModifiedDate
+                $record.AuditDate = Get-Date
+                
+                # Extract role information
+                if ($employee.role -and $roleLookup[$employee.role]) {
+                    $roleInfo = $roleLookup[$employee.role]
+                    $record.Role = $roleInfo.name
+                    $record.AdminRights = if ($roleInfo.name -like "*Admin*" -or $roleInfo.name -like "*Full*") { "Yes" } else { "No" }
+                    $record.Permissions = $roleInfo.permissions -join "; "
+                }
+                
+                # Determine access levels based on role
+                $record.FinancialAccess = if ($record.Role -like "*Accounting*" -or $record.Role -like "*Finance*" -or $record.AdminRights -eq "Yes") { "Yes" } else { "No" }
+                $record.ClientDataAccess = if ($record.Role -like "*Customer*" -or $record.Role -like "*Sales*" -or $record.AdminRights -eq "Yes") { "Yes" } else { "No" }
+                $record.SystemAccess = "NetSuite ERP"
+                
+                $this.AllRecords.Add($record)
+            }
+            
+            Write-Host "✅ NetSuite audit completed. Processed $($employees.Count) employees." -ForegroundColor Green
+            
+        }
+        catch {
+            Write-Error "❌ NetSuite audit failed: $($_.Exception.Message)"
+        }
+    }
+    
+    [void] AuditQuickBooks() {
+        Write-Host "`n🔧 Starting QuickBooks Access Audit..." -ForegroundColor Yellow
+        
+        try {
+            $client = [QuickBooksAPIClient]::new($this.Config.QuickBooks)
+            
+            # Test connection
+            $companyInfo = $client.TestConnection()
+            if (-not $companyInfo) {
+                Write-Error "❌ QuickBooks authentication failed. Check your OAuth credentials."
+                return
+            }
+            
+            Write-Host "✅ Connected to QuickBooks company: $($companyInfo.CompanyName)" -ForegroundColor Green
+            
+            $employees = $client.GetEmployees()
+            
+            foreach ($employee in $employees) {
+                $record = [AccessRecord]::new()
+                $record.Platform = "QuickBooks"
+                $record.UserId = $employee.Id
+                $record.UserName = $employee.Name
+                $record.Email = $employee.PrimaryEmailAddr.Address
+                $record.Status = if ($employee.Active) { "Active" } else { "Inactive" }
+                $record.EmployeeStatus = if ($employee.Active) { "Active" } else { "Terminated" }
+                $record.AuditDate = Get-Date
+                
+                # QuickBooks has limited user/permission data through API
+                # Employee records don't contain system access information
+                $record.Role = "Employee" # Default role for QB employees
+                $record.AdminRights = "Unknown" # Cannot determine from employee API
+                $record.FinancialAccess = "Unknown" # Cannot determine from employee API  
+                $record.ClientDataAccess = "Unknown" # Cannot determine from employee API
+                $record.SystemAccess = "QuickBooks Online"
+                $record.Permissions = "Employee Record Access"
+                $record.Notes = "QuickBooks API provides limited user permission data. Manual review recommended."
+                
+                $this.AllRecords.Add($record)
+            }
+            
+            Write-Host "✅ QuickBooks audit completed. Processed $($employees.Count) employees." -ForegroundColor Green
+            
+        }
+        catch {
+            Write-Error "❌ QuickBooks audit failed: $($_.Exception.Message)"
+        }
+    }
+    
+    [void] GenerateReports() {
+        Write-Host "`n📊 Generating Audit Reports..." -ForegroundColor Yellow
+        
+        # Combined report
+        $combinedFile = Join-Path $this.OutputPath "Combined_Access_Audit_$($this.Config.ReportDate).csv"
+        $this.AllRecords | Export-Csv -Path $combinedFile -NoTypeInformation
+        Write-Host "✅ Combined report: $combinedFile" -ForegroundColor Green
+        
+        # Platform-specific reports
+        foreach ($platform in @("Clio", "NetSuite", "QuickBooks")) {
+            $platformRecords = $this.AllRecords | Where-Object { $_.Platform -eq $platform }
+            if ($platformRecords.Count -gt 0) {
+                $platformFile = Join-Path $this.OutputPath "$($platform)_Access_Audit_$($this.Config.ReportDate).csv"
+                $platformRecords | Export-Csv -Path $platformFile -NoTypeInformation
+                Write-Host "✅ $platform report: $platformFile" -ForegroundColor Green
+            }
+        }
+        
+        # Risk analysis report
+        $this.GenerateRiskAnalysis()
+        
+        # Summary statistics
+        $this.GenerateSummaryReport()
+    }
+    
+    [void] GenerateRiskAnalysis() {
+        Write-Host "🔍 Generating Risk Analysis..." -ForegroundColor Cyan
+        
+        $riskRecords = @()
+        
+        # High-risk scenarios
+        foreach ($record in $this.AllRecords) {
+            $risks = @()
+            
+            # Check for segregation of duties violations
+            if ($record.AdminRights -eq "Yes" -and $record.FinancialAccess -eq "Yes") {
+                $risks += "Admin + Financial Access (SoD Violation)"
+            }
+            
+            # Check for inactive users with access
+            if ($record.Status -eq "Inactive" -and $record.SystemAccess) {
+                $risks += "Inactive User with System Access"
+            }
+            
+            # Check for terminated employees
+            if ($record.EmployeeStatus -eq "Terminated") {
+                $risks += "Terminated Employee with Access"
+            }
+            
+            if ($risks.Count -gt 0) {
+                $riskRecord = [PSCustomObject]@{
+                    Platform = $record.Platform
+                    UserName = $record.UserName
+                    Email = $record.Email
+                    Role = $record.Role
+                    RiskFactors = $risks -join "; "
+                    Severity = if ($risks -like "*Terminated*") { "Critical" } elseif ($risks -like "*SoD*") { "High" } else { "Medium" }
+                    AuditDate = $record.AuditDate
+                }
+                $riskRecords += $riskRecord
+            }
+        }
+        
+        if ($riskRecords.Count -gt 0) {
+            $riskFile = Join-Path $this.OutputPath "Risk_Analysis_$($this.Config.ReportDate).csv"
+            $riskRecords | Export-Csv -Path $riskFile -NoTypeInformation
+            Write-Host "⚠️  Risk analysis: $riskFile ($($riskRecords.Count) risks identified)" -ForegroundColor Yellow
+        } else {
+            Write-Host "✅ No high-risk access patterns identified" -ForegroundColor Green
+        }
+    }
+    
+    [void] GenerateSummaryReport() {
+        Write-Host "📈 Generating Summary Report..." -ForegroundColor Cyan
+        
+        $summary = [PSCustomObject]@{
+            AuditDate = Get-Date
+            TotalUsers = $this.AllRecords.Count
+            ClioUsers = ($this.AllRecords | Where-Object Platform -eq "Clio").Count
+            NetSuiteUsers = ($this.AllRecords | Where-Object Platform -eq "NetSuite").Count
+            QuickBooksUsers = ($this.AllRecords | Where-Object Platform -eq "QuickBooks").Count
+            ActiveUsers = ($this.AllRecords | Where-Object Status -eq "Active").Count
+            InactiveUsers = ($this.AllRecords | Where-Object Status -eq "Inactive").Count
+            AdminUsers = ($this.AllRecords | Where-Object AdminRights -eq "Yes").Count
+            FinancialAccessUsers = ($this.AllRecords | Where-Object FinancialAccess -eq "Yes").Count
+            TerminatedEmployees = ($this.AllRecords | Where-Object EmployeeStatus -eq "Terminated").Count
+        }
+        
+        $summaryFile = Join-Path $this.OutputPath "Audit_Summary_$($this.Config.ReportDate).csv"
+        $summary | Export-Csv -Path $summaryFile -NoTypeInformation
+        Write-Host "📊 Summary report: $summaryFile" -ForegroundColor Green
+        
+        # Display summary
+        Write-Host "`n📋 AUDIT SUMMARY" -ForegroundColor White -BackgroundColor Blue
+        Write-Host "Total Users Audited: $($summary.TotalUsers)"
+        Write-Host "  • Clio: $($summary.ClioUsers)"
+        Write-Host "  • NetSuite: $($summary.NetSuiteUsers)"
+        Write-Host "  • QuickBooks: $($summary.QuickBooksUsers)"
+        Write-Host ""
+        Write-Host "Access Status:"
+        Write-Host "  • Active: $($summary.ActiveUsers)"
+        Write-Host "  • Inactive: $($summary.InactiveUsers)"
+        Write-Host "  • Admin Rights: $($summary.AdminUsers)"
+        Write-Host "  • Financial Access: $($summary.FinancialAccessUsers)"
+        Write-Host "  • Terminated w/ Access: $($summary.TerminatedEmployees)" -ForegroundColor $(if ($summary.TerminatedEmployees -gt 0) { "Red" } else { "Green" })
+    }
+}
+
+# Configuration validation and loading
+function Initialize-AuditConfig {
+    param([string]$ConfigFile)
+    
+    if (-not (Test-Path $ConfigFile)) {
+        Write-Host "⚙️  Creating sample configuration file: $ConfigFile" -ForegroundColor Yellow
+        
+        $sampleConfig = @{
+            Clio = @{
+                BaseURL = "https://app.clio.com/api/v4"
+                AccessToken = "YOUR_CLIO_ACCESS_TOKEN_HERE"
+                Note = "Get access token from Clio OAuth 2.0 flow"
+            }
+            NetSuite = @{
+                AccountId = "YOUR_NETSUITE_ACCOUNT_ID"
+                ConsumerKey = "YOUR_CONSUMER_KEY"
+                ConsumerSecret = "YOUR_CONSUMER_SECRET"
+                TokenId = "YOUR_TOKEN_ID"
+                TokenSecret = "YOUR_TOKEN_SECRET"
+                Note = "Use Token-Based Authentication (TBA) credentials"
+            }
+            QuickBooks = @{
+                BaseURL = "https://sandbox-quickbooks.api.intuit.com"
+                AccessToken = "YOUR_QB_ACCESS_TOKEN"
+                CompanyId = "YOUR_COMPANY_ID"
+                Note = "Get credentials from QuickBooks OAuth 2.0 flow"
+            }
+        }
+        
+        $sampleConfig | ConvertTo-Json -Depth 3 | Out-File -FilePath $ConfigFile -Encoding UTF8
+        
+        Write-Host "📄 Sample configuration created. Please update with your credentials:" -ForegroundColor Green
+        Write-Host "   $ConfigFile" -ForegroundColor Cyan
+        Write-Host ""
+        Write-Host "Required API Credentials:" -ForegroundColor White
+        Write-Host "🔹 Clio: OAuth 2.0 Access Token from https://app.clio.com/oauth/authorize"
+        Write-Host "🔹 NetSuite: Token-Based Authentication from Setup > Integration > Manage Integrations"
+        Write-Host "🔹 QuickBooks: OAuth 2.0 tokens from https://developer.intuit.com/"
+        Write-Host ""
+        Write-Host "Exiting. Please configure credentials and run again." -ForegroundColor Yellow
+        exit 0
+    }
+    
+    try {
+        $configJson = Get-Content $ConfigFile -Raw | ConvertFrom-Json
+        
+        $config = [AuditConfig]::new()
+        $config.Clio = @{
+            BaseURL = $configJson.Clio.BaseURL
+            AccessToken = $configJson.Clio.AccessToken
+        }
+        $config.NetSuite = @{
+            AccountId = $configJson.NetSuite.AccountId
+            ConsumerKey = $configJson.NetSuite.ConsumerKey
+            ConsumerSecret = $configJson.NetSuite.ConsumerSecret
+            TokenId = $configJson.NetSuite.TokenId
+            TokenSecret = $configJson.NetSuite.TokenSecret
+        }
+        $config.QuickBooks = @{
+            BaseURL = $configJson.QuickBooks.BaseURL
+            AccessToken = $configJson.QuickBooks.AccessToken
+            CompanyId = $configJson.QuickBooks.CompanyId
+        }
+        
+        return $config
+    }
+    catch {
+        Write-Error "❌ Failed to load configuration: $($_.Exception.Message)"
+        exit 1
+    }
+}
+
+# Main execution
+function Start-AccessAudit {
+    param(
+        [string]$ConfigFile,
+        [string]$OutputPath,
+        [string[]]$Platforms
+    )
+    
+    Write-Host "🚀 Professional Services Access Audit Tool" -ForegroundColor White -BackgroundColor DarkBlue
+    Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" -ForegroundColor Blue
+    Write-Host "Platforms: $($Platforms -join ', ')"
+    Write-Host "Output: $OutputPath"
+    Write-Host "Config: $ConfigFile"
+    Write-Host ""
+    
+    # Load configuration
+    $config = Initialize-AuditConfig -ConfigFile $ConfigFile
+    
+    # Initialize auditor
+    $auditor = [AccessAuditor]::new($config, $OutputPath)
+    
+    # Run platform audits
+    if ($Platforms -contains "Clio") {
+        $auditor.AuditClio()
+    }
+    
+    if ($Platforms -contains "NetSuite") {
+        $auditor.AuditNetSuite()
+    }
+    
+    if ($Platforms -contains "QuickBooks") {
+        $auditor.AuditQuickBooks()
+    }
+    
+    # Generate reports
+    if ($auditor.AllRecords.Count -gt 0) {
+        $auditor.GenerateReports()
+        
+        Write-Host "`n🎉 Audit completed successfully!" -ForegroundColor Green
+        Write-Host "📁 Reports saved to: $OutputPath" -ForegroundColor Cyan
+        Write-Host ""
+        Write-Host "Next Steps:" -ForegroundColor White
+        Write-Host "1. Review risk analysis for immediate attention items"
+        Write-Host "2. Validate segregation of duties violations"
+        Write-Host "3. Remove access for terminated employees"
+        Write-Host "4. Schedule regular audits (quarterly recommended)"
+    } else {
+        Write-Warning "⚠️  No data collected. Check API credentials and connectivity."
+    }
+}
+
+# Script execution
+try {
+    Start-AccessAudit -ConfigFile $ConfigFile -OutputPath $OutputPath -Platforms $Platforms
+}
+catch {
+    Write-Error "❌ Audit failed: $($_.Exception.Message)"
+    Write-Host "Stack trace: $($_.ScriptStackTrace)" -ForegroundColor Red
+    exit 1
+}
